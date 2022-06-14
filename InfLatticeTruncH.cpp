@@ -17,10 +17,10 @@ int reach = 4;
 int budget = 2;
 
 double m0 = 0.3; //This makes sure the correlation length, 1/m0, is a few lattice sites
-double mbar = 4.0 / 3.14159;
+double mbar = 4.0/3.14159;
 
 double cutoff = pow(10,-11); //If the coefficient of a ket is below this cutoff, assume it's just a round-off error from 0 and delete it.
-bool initialBasisRestrictions = true; //Cut off certain computations early if I only want to deal with states I'd generate in the original basis, determined by the reach and budget
+bool initialBasisRestrictions = false; //Cut off certain computations early if I only want to deal with states I'd generate in the original basis, determined by the reach and budget
 
 void printVector(vector<int>* v){
 	for (int i = 0; i < v->size(); i++){
@@ -755,6 +755,7 @@ void getGroundStates(Eigen::SparseMatrix<double>* Htrunc, int numValues, vector<
 				eigenstate.push_back(k);
 			}
 		}
+		eigenstate = sortKetsByCoeff(eigenstate);
 		groundStates->push_back(eigenstate);
 	}
 }
@@ -819,17 +820,16 @@ void makeHtruncConverge(double threshold, int numValues, int maxLength, string o
 			//Now write the kets in the ground state to a file for later use
 			string outputFileGS = outputFile + "GroundStates.txt";
 			ofstream statesOutput;
+			statesOutput.open(outputFileGS);
 			//Immediately put in the key variables so those can be loaded later.
 			statesOutput << "m0=" << m0 << endl;
 			statesOutput << "mbar=" << mbar << endl;
 			statesOutput << "reach=" << reach << endl;
-			statesOutput.open(outputFileGS);
 			vector<ket> state;
 			vector<int> localQuanta;
 			double normTotal;
 			for (int i = 0; i < groundStates.size(); i++){
 				state = groundStates.at(groundStates.size() - 1 - i);
-				state = sortKetsByCoeff(state);
 				statesOutput << i << "," << groundEnergies.at(groundStates.size() - 1 - i) << endl;
 				normTotal = 0;
 				int ketCounter = 0;
@@ -905,6 +905,44 @@ void loadGroundStateFromFile(vector<ket>* groundStateKets, string filename){
 	cout << "Finished loading the old ground state." << endl;
 }
 
+void linearRegression(vector<double>* x, vector<double>* y){
+
+        if (x->size() != y->size()){
+                cout << "Warning: lists of x and y data are not the same size." << endl;
+                return;
+        }
+
+        int n = x->size();
+
+        double a; //The constant term
+        double b; //The slope
+
+        double xy = 0; // Sum over x_i * y_i
+        double xSum = 0;
+        double ySum = 0;
+        double xSquaredSum = 0;
+
+        for (int i = 0; i < n; i++){
+                xy += x->at(i) * y->at(i);
+                xSum += x->at(i);
+                ySum += y->at(i);
+                xSquaredSum += (x->at(i))*(x->at(i));
+        }
+
+        b = (xSum*ySum / n - xy) / (xSum*xSum / n - xSquaredSum);
+        a = (ySum - b*xSum) / n;
+        cout << "The linear fit is " << a << " + " << b << " x." << endl;
+
+        double sumResidualsSquared = 0;
+        double sumMeanDiffSquared = 0;
+
+        for (int i = 0; i < n; i++){
+                sumMeanDiffSquared += (y->at(i) - ySum/n)*(y->at(i) - ySum/n);
+                sumResidualsSquared += (y->at(i) - (a + b*x->at(i)))*(y->at(i) - (a + b*x->at(i)));
+        }
+        cout << "Rsquared = " << 1 - sumResidualsSquared / sumMeanDiffSquared;
+}
+
 void plotCorrelators(vector<ket>* groundState, string corrOutput){
 	ofstream outputFile;
 	outputFile.open(corrOutput);
@@ -916,6 +954,9 @@ void plotCorrelators(vector<ket>* groundState, string corrOutput){
 	vector<ket> Lstate;
 	double result;
 
+	vector<double> xs;
+	vector<double> ys;
+
 	for (int i = 1; i <= reach; i++){
 
 		Rstate = *groundState;
@@ -923,11 +964,45 @@ void plotCorrelators(vector<ket>* groundState, string corrOutput){
 
 		Rstate = correlator(&Rstate, i);
 		result = innerProduct(&Lstate, &Rstate);
+		if (result != 0){
+			xs.push_back(i);
+			ys.push_back(log(result));
+		}
 		outputFile << i << endl;
 		outputFile << result << endl;
+		cout << i << endl;
+		cout << result << endl;
 	}
 
 	outputFile.close();
+
+	linearRegression(&xs, &ys);
+}
+
+//check if a sparse matrix is diagonal
+bool isSymmetric(Eigen::SparseMatrix<double>* Htrunc){
+
+	int n = Htrunc->rows();
+	if (n != Htrunc->cols()){
+		cout << "Warning: matrix is not diagonal." << endl;	
+	}
+
+	for (int i = 0; i < n; i++){
+		for (int j = 0; j <= i; j++){ //I only need to check the upper-triangular part of the matrix, so just go until j < i
+			if ( abs(Htrunc->coeffRef(i,j) - Htrunc->coeffRef(j,i)) > cutoff){ //See if this element isn't equal to its partner across the diagonal
+				cout << "Asymmetry at (" << i << "," << j << ")" << endl;
+				cout << "Htrunc(" << i << "," << j << ") = " << Htrunc->coeffRef(i,j) << endl;
+				cout << "Htrunc(" << j << "," << i << ") = " << Htrunc->coeffRef(j,i) << endl;
+				cout << "Difference = " << Htrunc->coeffRef(i,j) - Htrunc->coeffRef(j,i) << endl;
+				cout << "Relevant basis states are... " << endl;
+				cout << "i = " << i << endl;
+				cout << "j = " << j << endl;
+				return false;
+			}
+		}
+	}
+	
+	return true;	//If it made it through all that and never found one that didn't match, it's symmetric.
 }
 
 void testLadderOps(){
@@ -1134,11 +1209,80 @@ void checkSameQuanta(){
 	cout << sameQuanta(&k1, &k2) << endl;
 }
 
+void testRegression(){
+
+	vector<double> x = {2,3,4,6};
+	vector<double> y = {2,4,6,7};
+
+	linearRegression(&x, &y);
+
+}
+
+void HactOnOneState(){
+	
+	vector<int> q1 = {0};
+	vector<int> q2 = {1};
+	vector<int> q3 = {1,1};
+	vector<int> q4 = {1,1,1};
+	vector<int> q5 = {1,1,0,1};
+	vector<int> q6 = {1,0,1,1};
+
+	ket k1(-0.986109,&q1);
+	ket k2(-0.915997,&q2);
+	ket k3(-0.14707,&q3);
+	ket k4(-0.24345,&q4);
+	ket k5(-0.140871,&q5);
+	ket k6(-0.140871,&q6);
+
+	vector<ket> state0;
+	vector<ket> state1;
+
+	state0.push_back(k3);
+	cout << "Hop acting on |1,1>" << endl;
+
+	vector<ket> result = HSumOverLSites(state0,-5,5);
+	listStateValues(&result);
+}
+
 int main(int argc, char *argv[]){
-	string filename = "r8OnePercent";
-	//makeHtruncConverge(0.01, 2, 8, filename);
-	//cout << "Finished making the truncated H." << endl;
+	/*
+	string filename = "r12FivePercent";
+	makeHtruncConverge(0.05, 1, 12, filename);
+	cout << "Finished making the truncated H." << endl;
 	vector<ket> groundState;
 	loadGroundStateFromFile(&groundState, filename + "GroundStates.txt");
 	plotCorrelators(&groundState, filename + "Correlator.txt");
+	*/
+	//testRegression();
+
+	vector<vector<ket>> useBasis;
+	vector<ket> opBasis;
+	vector<ket> matrixBasis;
+	makeBasis(&useBasis, &opBasis, &matrixBasis, 2, 2);
+	cout << "Made a basis of size " << opBasis.size() << endl;
+	listStateValues(&opBasis);
+
+	vector<ket> testState = useBasis.at(1);
+	vector<ket> result = Hop(testState,-1);
+	listStateValues(&result);
+
+	/*
+	int basisSize = opBasis.size();
+	Eigen::SparseMatrix<double> Htrunc(basisSize, basisSize);
+
+	makeHtrunc(&Htrunc, &useBasis, &opBasis);
+
+	cout << "Is it symmetric? " << isSymmetric(&Htrunc) << endl;
+
+        vector<vector<ket>> groundStates;
+        vector<double> groundEnergies;
+        getGroundStates(&Htrunc, 2, &matrixBasis, &groundStates, &groundEnergies);
+        cout << "Ground energy: " << groundEnergies.at(1) << endl;
+        cout << "Ground state: " << endl;
+        listStateValues(&(groundStates.at(1)));
+	cout << "Next-lowest state:" << endl;
+	cout << "Energy = " << groundEnergies.at(0) << endl;
+	cout << "State: " << endl;
+	listStateValues(&(groundStates.at(0)));
+	*/
 }
