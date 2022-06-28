@@ -8,9 +8,15 @@
 #include <Eigen/SparseCore>
 #include <Spectra/SymEigsSolver.h>
 #include <Spectra/MatOp/SparseSymMatProd.h>
+#include "stdafx.h"
+#include "interpolation.h"
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
 
 using namespace std;
 using namespace Spectra;
+using namespace alglib;
 
 //Set some global variables. These are just the default values and will probaby be modified later.
 int reach = 4;
@@ -53,6 +59,7 @@ class ket {
 			printVector(&(quanta));
 			cout << "Indices: " << endl;
 			printVector(&(indices));
+			cout <<  "Basis Tag: " << basisTag << endl;
 		}
 
 		int totalQuanta(){
@@ -61,6 +68,27 @@ class ket {
 				runningTotal += quanta.at(i);
 			}
 			return runningTotal;
+		}
+
+		void resetIndices(){
+			vector<int> updatedIndices;
+			for (int i = 0; i < quanta.size(); i++){
+				updatedIndices.push_back(i);
+			}
+			indices = updatedIndices;
+		}
+
+		void writeValues(ofstream outputFile){
+			outputFile << coeff << endl;
+			for (int i = 0; i < quanta.size(); i++){
+				outputFile << quanta.at(i) << ",";
+			}
+			outputFile << endl;
+			for (int i = 0; i < indices.size(); i++){
+				outputFile << indices.at(i) << ",";
+			}
+			outputFile << endl;
+			outputFile << basisTag << endl;
 		}
 };
 
@@ -294,6 +322,50 @@ void makeBasis(vector<vector<ket>>* useBasis, vector<ket>* opBasis, vector<ket>*
         *matrixBasis = *opBasis;
 }
 
+//Given a list of kets, sort them into even and odd. It preserves whatever original ordering they had.
+void sortKetsByParity(vector<ket>* allStates, vector<ket>* evenStates, vector<ket>* oddStates){
+
+	for (int i = 0; i < allStates->size(); i++){
+		if ( (allStates->at(i)).totalQuanta() % 2 == 0 ){
+			evenStates->push_back(allStates->at(i));
+		} else{
+			oddStates->push_back(allStates->at(i));
+		}
+	}
+
+	//redo the basis numberings.
+	for (int i = 0; i < evenStates->size(); i++){
+		(evenStates->at(i)).basisTag = i;
+	}
+	for (int i = 0; i < oddStates->size(); i++){
+		(oddStates->at(i)).basisTag = i;
+	}
+}
+
+//Do the same thing, but for the use basis
+void sortUseBasisByParity(vector<vector<ket>>* allStates, vector<vector<ket>>* evenStates, vector<vector<ket>>* oddStates){
+
+	for (int i = 0; i < allStates->size(); i++){
+		if ( (allStates->at(i)).size() > 1 ){
+			cout << "Warning: more than one ket per state here. Quitting the parity sort now." << endl;
+			return;
+		}
+		if ( (allStates->at(i)).at(0).totalQuanta() % 2 == 0){
+			evenStates->push_back(allStates->at(i));
+		} else{
+			oddStates->push_back(allStates->at(i));
+		}
+	}
+	
+	//Redo the basis numberings.
+	for (int i = 0; i < evenStates->size(); i++){
+		(evenStates->at(i)).at(0).basisTag = i;
+	}
+	for (int i = 0; i < oddStates->size(); i++){
+		(oddStates->at(i)).at(0).basisTag = i;
+	}
+}
+
 //Checks if two kets have the same quanta
 bool sameQuanta(ket* k1, ket* k2){
 
@@ -419,9 +491,13 @@ void insertKet(ket* k, vector<ket>* opBasis){
 	int secondCompResult;
 	bool keepGoing = true;
 
-	//This case ends up working funnily if the ket belongs at the end, which I think we'll do a lot, so check this up front
+	//This case ends up working funnily if the ket belongs at the beginning or end, so check this up front
 	if (rankTwoKets(k, &(opBasis->at(R))) == 0){
 		opBasis->push_back(*k);
+		return;
+	}
+	if (rankTwoKets(k, &(opBasis->at(L))) == 1){
+		opBasis->insert(opBasis->begin(), *k);
 		return;
 	}
 
@@ -476,7 +552,8 @@ int adjustKetIndices(ket* k, int index){
 	//Save the data in the original ket
 	k->quanta = localQuanta;
 	k->indices = localIndices;
-	return localIndices.at(localIndices.size() - 1);
+	//return localIndices.at(localIndices.size() - 1);
+	return localIndices.size() - 1; //If it's made it all the way to the end, it needs to act at on the last index spot, when all the 0s have been padded out.
 
 }
 
@@ -527,6 +604,22 @@ void mergeKetLists(vector<ket>* state1, vector<ket>* state2){
 	state1->insert(state1->end(), state2->begin(), state2->end());
 	mergeKets(state1);
 
+}
+
+//Insert newKets, in-order, to an already-sorted list. THIS CAN BE IMPROVED. First, it sees if the new ket is already in the list. If so, it just adds the coefficient. If not, it does the binary search again, but the version about how to insert a new ket.
+void insertToSortedList(vector<ket>* sortedList, vector<ket>* newKets){
+	int ketIndex;
+	for (int i = 0; i < newKets->size(); i++){
+		ketIndex = findKetIndex( &(newKets->at(i)), sortedList, 0);
+		if (ketIndex != -1){
+			(sortedList->at(ketIndex)).coeff += (newKets->at(i)).coeff;
+			if ( (sortedList->at(ketIndex)).coeff < cutoff){
+				sortedList->erase(sortedList->begin() + ketIndex);
+			}
+		} else{
+			insertKet( &(newKets->at(i)), sortedList);
+		}
+	}
 }
 
 //Multiply all the kets in a linear combination by a coefficient
@@ -611,14 +704,13 @@ void aDagOp(vector<ket>* state, int x){
 }
 
 //The normal-ordered phi^2 operator at some point x
-vector<ket> phiSquaredNO(vector<ket>* state, int x){
+void phiSquaredNO(vector<ket>* term1, int x){
 
-	vector<ket> term1 = *state;
-	vector<ket> term2 = *state;
-	vector<ket> term3 = *state;
+	vector<ket> term2 = *term1;
+	vector<ket> term3 = *term1;
 
-	aOp(&term1, x);
-	aOp(&term1, x);
+	aOp(term1, x);
+	aOp(term1, x);
 
 	aDagOp(&term2, x);
 	aDagOp(&term2, x);
@@ -628,23 +720,20 @@ vector<ket> phiSquaredNO(vector<ket>* state, int x){
 	multiplyOverKets(&term3, 2);
 
 	mergeKetLists(&term2, &term3);
-	mergeKetLists(&term1, &term2);
+	mergeKetLists(term1, &term2);
 
-	multiplyOverKets(&term1, 0.5/mbar);
-
-	return term1;
+	multiplyOverKets(term1, 0.5/mbar);
 }
 
 //The cross-term operator phi_x phi_x+a
-vector<ket> phixphixpa(vector<ket>* state, int x, int a){
+void phixphixpa(vector<ket>* term1, int x, int a){
 
-	vector<ket> term1 = *state;
-	vector<ket> term2 = *state;
-	vector<ket> term3 = *state;
-	vector<ket> term4 = *state;
+	vector<ket> term2 = *term1;
+	vector<ket> term3 = *term1;
+	vector<ket> term4 = *term1;
 
-	aOp(&term1, x);
-	aOp(&term1, x+a);
+	aOp(term1, x);
+	aOp(term1, x+a);
 
 	aDagOp(&term2, x);
 	aDagOp(&term2, x+a);
@@ -658,103 +747,190 @@ vector<ket> phixphixpa(vector<ket>* state, int x, int a){
 
 	mergeKetLists(&term3, &term4);
 	mergeKetLists(&term2, &term3);
-	mergeKetLists(&term1, &term2);
+	mergeKetLists(term1, &term2);
 
-	multiplyOverKets(&term1, 0.5 / mbar);
-
-	return term1;
+	multiplyOverKets(term1, 0.5 / mbar);
 }
 
 //This is the translationally-invariant sum of the phi_x phi_x+a operator. I make it act on one ket at a time since the trial ground state has to be handled differently... but I could probably make this run faster.
-vector<ket> correlator(vector<ket>* state, int a){
+void correlator(vector<ket>* state, int a){
+	cout << "a = " << a << endl;
 
 	vector<ket> result;
 	vector<ket> tempResult;
 	int ketSize;
 
+        //First, find the trial ground state, pull it out, and handle it separately since it's already translationally invariant.
+        for (int i = 0; i < state->size(); i++){
+                if ( isTrialGroundState(&(state->at(i))) ){
+                        ket k = state->at(i);
+                        state->erase(state->begin() + i); //Pull the ket out and erase it from the rest
+                        vector<ket> tempState;
+                        tempState.push_back(k);
+                        phixphixpa(&tempState,0,a);
+                        mergeKetLists(&result, &tempState);
+                        break;
+                }
+        }
+
+	//Have the operator act on the other kets in the list one at a time. This is faster because I can re-size the translationally-invariant sum for each one, based on the limits with the reach
 	for (int i = 0; i < state->size(); i++){
+		if (i % 100 == 0){
+			cout << "i = " << i << endl;
+		}
 		vector<ket> preppedState;
 		preppedState.push_back(state->at(i));
-		if (isTrialGroundState(&(state->at(i)))){ //Don't sum over the trial ground state; it has to be handled differently
-			tempResult = phixphixpa(&preppedState,0,a);
-			mergeKetLists(&result, &tempResult);
-			continue;
-		}
 		ketSize = (state->at(i)).quanta.size();
-		for (int x = -(reach - ketSize); x < (reach - 1); x++){
-			tempResult = phixphixpa(&preppedState,x,a);
-			mergeKetLists(&result, &tempResult);
+		for (int x = -(reach - ketSize); x < (reach - a); x++){
+			tempResult = preppedState;
+/*			if (i % 500 == 0){
+				cout << "x = " << x << endl;
+				cout << "Number of kets before operator: " << tempResult.size() << endl;
+				listStateValues(&tempResult);
+			}
+*/			phixphixpa(&tempResult,x,a);
+/*			if (i % 500 == 0){
+				cout << "Number of kets after operator: " << tempResult.size() << endl;
+				listStateValues(&tempResult);
+			}
+*/			insertToSortedList(&result, &tempResult);
+/*			if (i % 500 == 0){
+				cout << "Finished merging these results into the list." << endl;
+			}
+*/		}
+	}
+
+	/*
+	//First, find the trial ground state, pull it out, and handle it separately since it's already translationally invariant.
+	for (int i = 0; i < state->size(); i++){
+		if ( isTrialGroundState(&(state->at(i))) ){
+			tempKet k = state->at(i);
+			state->erase(state->begin() + i); //Pull the ket out and erase it from the rest
+			vector<ket> tempState;
+			tempState.push_back(k);
+			phixphixpa(&tempState,0,a);
+			mergeKetLists(&result, &tempState);
+			break;
 		}
 	}
 
-	return result;
+	//Do a translationally-invariant sum over the rest
+	vector<ket> preppedState;
+	for (int x = -(reach - ketSize); x < (reach - 1); x++){
+		preppedState = *state;
+		phixphixpa(&preppedState,x,a);
+		mergeKetLists(&result, &preppedState);
+		preppedState.clear();
+	}*/
+	*state = result;
 }
 
 //Just the base QHO Hamiltonian, with the constant term dropped, acting on site x
-vector<ket> H0op(vector<ket> state, int x){
+void H0op(vector<ket>* state, int x){
 
-	aOp(&state, x);
-	aDagOp(&state, x);
-	multiplyOverKets(&state, mbar);
-
-	return state;
+	aOp(state, x);
+	aDagOp(state, x);
+	multiplyOverKets(state, mbar);
 }
 
 //The potential terms for the Hamiltonian, 1/2 (m^2 - mbar^2)phi_x^2 + 1/2 (phi_x+1 - phi_x)^2
-vector<ket> Vop(vector<ket> state, int x){
+void Vop(vector<ket>* term1, int x){
 
-	vector<ket> term1 = state;
-	vector<ket> term2 = state;
-	vector<ket> term3 = state;
+	vector<ket> term2 = *term1;
+	vector<ket> term3 = *term1;
 
-	term1 = phiSquaredNO(&term1, x);
-	multiplyOverKets(&term1, 0.5*(m0*m0 - mbar*mbar + 1));
+	phiSquaredNO(term1, x);
+	multiplyOverKets(term1, 0.5*(m0*m0 - mbar*mbar + 1));
 
-	term2 = phiSquaredNO(&term2, x+1);
+	phiSquaredNO(&term2, x+1);
 	multiplyOverKets(&term2, 0.5);
 
-	term3 = phixphixpa(&term3, x, 1);
+	phixphixpa(&term3, x, 1);
 	multiplyOverKets(&term3, -1);
 
 	mergeKetLists(&term2, &term3);
-	mergeKetLists(&term1, &term2);
-
-	return term1;
+	mergeKetLists(term1, &term2);
 }
 
 //The complete Hamiltonian density operator
-vector<ket> Hop(vector<ket> state, int x){
+void Hop(vector<ket>* term1, int x){
 
-	vector<ket> term1 = state;
-	vector<ket> term2 = state;
+	vector<ket> term2 = *term1;
 
-	term1 = H0op(term1, x);
-	term2 = Vop(term2, x);
+	H0op(term1, x);
+	Vop(&term2, x);
 
-	mergeKetLists(&term1, &term2);
-
-	return term1;
+	mergeKetLists(term1, &term2);
 }
 
-vector<ket> HSumOverLSites(vector<ket> state, int start, int finish){
+void HSumOverLSites(vector<ket>* state, int start, int finish){
 
 	vector<ket> oneTermResult;
 	vector<ket> allResults;
 
 	for (int i = start; i < finish; i++){
-		oneTermResult = Hop(state, i);
+		oneTermResult = *state;
+		Hop(&oneTermResult, i);
 		mergeKetLists(&allResults, &oneTermResult);
 	}
 
-	return allResults;
+	*state = allResults;
+	//return allResults;
 
 }
 
-//Creates the sparse matrix for the whole Hamiltonian density
-void makeHtrunc(Eigen::SparseMatrix<double>* Htrunc, vector<vector<ket>>* useBasis, vector<ket>* opBasis){
+//check if a sparse matrix is diagonal
+bool isSymmetric(Eigen::SparseMatrix<double>* Htrunc){
 
-	vector<ket> preOpState;
-	vector<ket> postOpState;
+        int n = Htrunc->rows();
+        if (n != Htrunc->cols()){
+                cout << "Warning: matrix is not square." << endl;
+        }
+
+	Eigen::SparseMatrix<double> Htranspose = Htrunc->transpose();
+	Eigen::SparseMatrix<double> matrixSum = *Htrunc - Htranspose;
+	//Iterate over the elements explicitly listed and see if any are nonzero
+	for (int k = 0; k < matrixSum.outerSize(); ++k){
+		for (Eigen::SparseMatrix<double>::InnerIterator it(matrixSum, k); it; ++it){
+			if (it.value() != 0){
+				cout << "Htrunc is asymmetric at (" << it.row() << "," << it.col() << ")" << endl;
+				cout << "Htrunc(" << it.row() << "," << it.col() << ") = " << Htrunc->coeffRef(it.row(), it.col()) << endl;
+				cout << "Htrunc(" << it.col() << "," << it.row() << ") = " << Htrunc->coeffRef(it.col(), it.row()) << endl;
+				return false;
+			}
+		}
+	}
+
+	/*
+        for (int i = 0; i < n; i++){
+                for (int j = 0; j <= i; j++){ //I only need to check the upper-triangular part of the matrix, so just go until j < i
+                        if ( abs(Htrunc->coeffRef(i,j) - Htrunc->coeffRef(j,i)) > cutoff){ //See if this element isn't equal to its partner across the diagonal
+                                cout << "Asymmetry at (" << i << "," << j << ")" << endl;
+                                cout << "Htrunc(" << i << "," << j << ") = " << Htrunc->coeffRef(i,j) << endl;
+                                cout << "Htrunc(" << j << "," << i << ") = " << Htrunc->coeffRef(j,i) << endl;
+                                cout << "Difference = " << Htrunc->coeffRef(i,j) - Htrunc->coeffRef(j,i) << endl;
+                                cout << "Relevant basis states are... " << endl;
+                                cout << "i = " << i << endl;
+                                cout << "j = " << j << endl;
+                                return false;
+                        }
+                }
+        }*/
+
+        return true;    //If it made it through all that and never found one that didn't match, it's symmetric.
+}
+
+
+//Creates the sparse matrix for the whole Hamiltonian density
+void makeHtrunc(Eigen::SparseMatrix<double>* Htrunc, vector<vector<ket>>* useBasis, vector<ket>* opBasis, int L){
+
+	//L has to do with the size of the lattice and is important for the normalization of the non-trial-vacuum states.
+	double matrixElementCoeff1 = 1.0 / L;
+	double matrixElementCoeff2 = 1.0 / sqrt(L);
+
+	cout << "Making Htrunc." << endl;
+
+	vector<ket> preppedState;
 	int row;
 	int column;
 	int startTransInvCounter;
@@ -764,54 +940,62 @@ void makeHtrunc(Eigen::SparseMatrix<double>* Htrunc, vector<vector<ket>>* useBas
 	//Handle the trial ground state differently since it's already translationally invariant.
 	if (isTrialGroundState(&(useBasis->at(0).at(0)))){
 		startTransInvCounter = 1; //Start the next cycle from 1, since I already took care of 0
-		preOpState = useBasis->at(0);
-		column = preOpState.at(0).basisTag;
-		postOpState = Hop(preOpState, 0);
-		for (int j = 0; j < postOpState.size(); j++){
-			row = findKetIndex(&(postOpState.at(j)), opBasis);
+		preppedState = useBasis->at(0);
+		column = preppedState.at(0).basisTag;
+		Hop(&preppedState, 0);
+		for (int j = 0; j < preppedState.size(); j++){
+			row = findKetIndex(&(preppedState.at(j)), opBasis);
+			//cout << "(row, column) = (" << row << "," << column << ")" << endl;
 			if (row != -1){
-				Htrunc->coeffRef(row,column) += postOpState.at(j).coeff;
+				Htrunc->coeffRef(row,column) += preppedState.at(j).coeff * matrixElementCoeff2;
+				//cout << "Updated the matrix." << endl;
 			}
 		}
 	} else{
 		startTransInvCounter = 0;
 	}
 
+	cout << "Done with the part with the trial ground ket." << endl;
+
 	for (int i = startTransInvCounter; i < useBasis->size(); i++){
-		preOpState = useBasis->at(i);
-		if (preOpState.size() > 1){
+		preppedState = useBasis->at(i);
+		if (preppedState.size() > 1){
 			cout << "Warning: there are multiple kets in this basis state " << i << endl;
 		}
-		column = preOpState.at(0).basisTag;
-		postOpState = HSumOverLSites(preOpState, -reach, reach);
-		for (int j = 0; j < postOpState.size(); j++){
-			row = findKetIndex(&(postOpState.at(j)), opBasis);
+		column = preppedState.at(0).basisTag;
+		HSumOverLSites(&preppedState, -reach, reach);
+		for (int j = 0; j < preppedState.size(); j++){
+			row = findKetIndex(&(preppedState.at(j)), opBasis);
+			//cout << "(row, column) = (" << row << "," << column << ")" << endl;
 			if (row != -1){ //If row == -1, the ket is out of the basis
-				Htrunc->coeffRef(row, column) += postOpState.at(j).coeff;
+				Htrunc->coeffRef(row, column) += preppedState.at(j).coeff * matrixElementCoeff1;
 			}
 		}
 	}
 }
 
-//Gets the n lowest many eigenvalues and eigenvectors from a sparse matrix
-void getGroundStates(Eigen::SparseMatrix<double>* Htrunc, int numValues, vector<ket>* matrixBasis, vector<vector<ket>>* groundStates, vector<double>* groundEnergies){
+//Gets the n lowest many eigenvalues and eigenvectors from a sparse matrix. There's an option for picking the eigenvectors that use only states with an even number of excitations, which we believe is physical for the ground state
+//It is recommended to ask for the two lowest eigenstates so we can pick the even one.
+void getGroundStates(Eigen::SparseMatrix<double>* Htrunc, int numValues, vector<ket>* matrixBasis, vector<vector<ket>>* groundStates, vector<double>* groundEnergies, bool pickEven){
 	//Follow the tutorial from Spectra
 	SparseSymMatProd<double> op(*Htrunc);
-	SymEigsSolver<SparseSymMatProd<double>> eigs(op, numValues, 2*numValues);
+	int basisSize = matrixBasis->size();
+	int convergenceParameter = min(10*numValues, basisSize / 2 + 1);
+	SymEigsSolver<SparseSymMatProd<double>> eigs(op, numValues, convergenceParameter);
 	eigs.init();
-	int nconv = eigs.compute(SortRule::SmallestAlge);
 	Eigen::VectorXd evalues;
 	Eigen::MatrixXd evectors;
+	int nconv = eigs.compute(SortRule::SmallestAlge);
 	if (eigs.info() == CompInfo::Successful){
 		evalues = eigs.eigenvalues();
 		evectors = eigs.eigenvectors();
-	} else{
-		cout << "Warning: the eigenstuff was NOT computed successfully." << endl;
+	} else if (eigs.info() == CompInfo::NotConverging){
+		cout << "Warning: the eigenstuff did NOT converge." << endl;
+	} else if (eigs.info() == CompInfo::NumericalIssue){
+		cout << "Warning: There's some kind of numerical issue." << endl;
+	} else {
+		cout << "Warning: the eigenstuff was NOT computed successfully, and I don't understand why." << endl;
 	}
-
-	for (int i = 0; i < numValues; i++){
-		groundEnergies->push_back(evalues(i));
-	} //Note that this means the lowest eigenvalue, and the ground state, are at the BACK of the vector
 
 	//Now turn the coefficients of the eigenvectors into ket lists
 	for (int i = 0; i < numValues; i++){
@@ -823,33 +1007,67 @@ void getGroundStates(Eigen::SparseMatrix<double>* Htrunc, int numValues, vector<
 				eigenstate.push_back(k);
 			}
 		}
+		if (pickEven){//check the first ket to see if it's an even or odd number of excitations
+			if ((eigenstate.at(0)).totalQuanta() % 2 == 1){
+				continue; //If the first ket is odd, that means they all are. Don't save this and move on.
+			}
+		}
 		eigenstate = sortKetsByCoeff(eigenstate);
 		groundStates->push_back(eigenstate);
+		groundEnergies->push_back(evalues(i)); //Note that this scheme means the lowest eigenstate is at the back of the vector.
+	}
+
+	if (groundEnergies->size() == 0){
+		cout << "Warning: no eigenstates meeting the specifications were found." << endl;
 	}
 }
 
-void makeHtruncConverge(double threshold, int numValues, int maxLength, string outputFile){
+//The last parameter designates whether to expand the basis by fixing a reach and expanding the budget (0) or fixing the budget and expanding the reach (1).
+//It seems like a long reach is more important than a high budget.
+void makeHtruncConverge(double threshold, int numValues, int maxLength, int maxBudget, int L,  string outputFile, int parameterOption){
 
 	//Open the output file
 	ofstream energiesOutput;
 	energiesOutput.open(outputFile + ".txt");
 
-	//Start with a budget of two and increment by twos after that
-	budget = 2;
-	reach = maxLength;
+	//Set up the initial parameters
+	if (parameterOption == 0){
+		budget = 2;
+		reach = maxLength;
+	} else if(parameterOption == 1){
+		reach = 6;
+		budget = maxBudget;
+	} else if (parameterOption == 2){
+		budget = 2;
+		reach = 6;
+	}
 
 	vector<vector<ket>> useBasis;
 	vector<ket> opBasis;
 	vector<ket> matrixBasis;
 	makeBasis(&useBasis, &opBasis, &matrixBasis, budget, reach);
-	int basisSize = opBasis.size();
 
-	Eigen::SparseMatrix<double> Htrunc(basisSize, basisSize);
-        makeHtrunc(&Htrunc, &useBasis, &opBasis);
+	//Sort out just the states with even numbers of excitations. Keep the odds around in case we'll use them later.
+	vector<vector<ket>> evenUseBasis;
+	vector<vector<ket>> oddUseBasis;
+	vector<ket> evenOpBasis;
+	vector<ket> oddOpBasis;
+	vector<ket> evenMatrixBasis;
+	vector<ket> oddMatrixBasis;
+
+	sortKetsByParity(&opBasis, &evenOpBasis, &oddOpBasis);
+	sortKetsByParity(&matrixBasis, &evenMatrixBasis, &oddMatrixBasis);
+	sortUseBasisByParity(&useBasis, &evenUseBasis, &oddUseBasis);
+
+	int basisSize = evenOpBasis.size();
+	cout << "Size of the basis: " << basisSize << endl;
+
+	Eigen::SparseMatrix<double> HtruncEven(basisSize, basisSize);
+        makeHtrunc(&HtruncEven, &evenUseBasis, &evenOpBasis, 3*reach+3);
 
         vector<vector<ket>> groundStates;
         vector<double> groundEnergies;
-        getGroundStates(&Htrunc, numValues, &matrixBasis, &groundStates, &groundEnergies);
+        getGroundStates(&HtruncEven, numValues, &evenMatrixBasis, &groundStates, &groundEnergies, true);
 	double prevGroundEnergy = groundEnergies.at(groundEnergies.size() - 1);
 	cout << "Basis size: " << basisSize << endl;
 	cout << "Ground Energy: " << prevGroundEnergy << endl;
@@ -860,27 +1078,46 @@ void makeHtruncConverge(double threshold, int numValues, int maxLength, string o
 	//Now that I have an initial value, I can start incrementing the budget and compare for convergence
 	bool converged;
 	while (!converged){
-		budget += 2; //Increment the budget. Don't increment reach; that takes forever to converge
+		//Increment the relevant parameter.
+		if (parameterOption == 0){
+			budget += 2; // Increment the budget by two, because of how the ground state only uses 1 parity.
+		} else if (parameterOption == 1){
+			reach += 2;
+		} else if (parameterOption == 2){
+			budget += 2;
+			reach += 2; //Increment both by two if the convergence seems to be happening more slowly
+		}
 		useBasis.clear();
 		opBasis.clear();
 		matrixBasis.clear();
+		evenUseBasis.clear();
+		oddUseBasis.clear();
+		evenOpBasis.clear();
+		oddOpBasis.clear();
+		evenMatrixBasis.clear();
+		oddMatrixBasis.clear();
+
 		makeBasis(&useBasis, &opBasis, &matrixBasis, budget, reach); //Make the new basis
-		basisSize = opBasis.size();
+	        sortKetsByParity(&opBasis, &evenOpBasis, &oddOpBasis);
+	        sortKetsByParity(&matrixBasis, &evenMatrixBasis, &oddMatrixBasis);
+	        sortUseBasisByParity(&useBasis, &evenUseBasis, &oddUseBasis);
+
+		basisSize = evenOpBasis.size();
 		cout << "Made a basis of size " << basisSize << " with reach " << reach << " and budget " << budget << endl;
 
-		Htrunc.setZero();
-		Htrunc.resize(basisSize, basisSize);
-		makeHtrunc(&Htrunc, &useBasis, &opBasis); //Make Htrunc again
+		HtruncEven.setZero();
+		HtruncEven.resize(basisSize, basisSize);
+		makeHtrunc(&HtruncEven, &evenUseBasis, &evenOpBasis, 3*reach+3); //Make Htrunc again
 		cout << "Made the truncated Hamiltonian." << endl;
 
 		groundStates.clear();
 		groundEnergies.clear();
-		getGroundStates(&Htrunc, numValues, &matrixBasis, &groundStates, &groundEnergies);
+		getGroundStates(&HtruncEven, numValues, &evenMatrixBasis, &groundStates, &groundEnergies, true);
 		nextGroundEnergy = groundEnergies.at(groundEnergies.size() - 1);
 
 		cout << "Basis size: " << basisSize << endl;
 		cout << "Ground Energy: " << nextGroundEnergy << endl;
-		energiesOutput << basisSize << endl;
+		energiesOutput << basisSize << ", " << budget << ", " << reach << ", " << 3*reach+3 << endl;
 		energiesOutput << prevGroundEnergy << endl;
 
 		if (abs( (nextGroundEnergy - prevGroundEnergy) / nextGroundEnergy) < threshold){ //If they've converged, finish the process
@@ -899,17 +1136,13 @@ void makeHtruncConverge(double threshold, int numValues, int maxLength, string o
 			for (int i = 0; i < groundStates.size(); i++){
 				state = groundStates.at(groundStates.size() - 1 - i);
 				statesOutput << i << "," << groundEnergies.at(groundStates.size() - 1 - i) << endl;
-				normTotal = 0;
-				int ketCounter = 0;
-				while (normTotal < 0.99){ //Write states until I've covered 99% of the state's norm
-					statesOutput << (state.at(ketCounter)).coeff << endl;
-					normTotal += (state.at(ketCounter)).coeff * (state.at(ketCounter)).coeff;
-					localQuanta = (state.at(ketCounter)).quanta;
+				for (int j = 0; j < state.size(); j++){
+					statesOutput << (state.at(j)).coeff << endl;
+					localQuanta = (state.at(j)).quanta;
 					for (int k = 0; k < localQuanta.size(); k++){
 						statesOutput << localQuanta.at(k) << ",";
 					}
 					statesOutput << endl;
-					ketCounter++;
 				}
 				statesOutput << "x" << endl; //This is a signal for the ket reader functions to move on
 			}
@@ -921,6 +1154,237 @@ void makeHtruncConverge(double threshold, int numValues, int maxLength, string o
 
 	energiesOutput.close();
 
+}
+
+//This function computes a number to characterize how different two states are. First, for all kets they share in common, it sums the difference of their coefficients squared. Then, for each ket unique to a state, its coefficient squared is added to the total too.
+double computeStateDifferencesSquared(vector<ket> state1, vector<ket> state2, bool altPhase){
+
+	//Sort the lists so it's easy to find matches between them.
+	state1 = sortKetList(state1);
+	state2 = sortKetList(state2);
+
+	//Judge which one is shorter.
+	vector<ket> shorterState = state1;
+	vector<ket> longerState = state2;
+	if (shorterState.size() > state2.size()){
+		shorterState = state2;
+		longerState = state1;
+	}
+
+	ket testKet = shorterState.at(0);
+	int matchedKetIndex;
+	//Make sure the states are in-phase.
+	bool inPhase = false;
+	int counter = 0;
+	/*
+	cout << "About to do the phase adjustment." << endl;
+	while (!inPhase){
+		testKet = shorterState.at(counter);
+		matchedKetIndex = findKetIndex(&testKet, &longerState, 0);
+		if (matchedKetIndex != -1){ //If we have a matched pair, then we can make sure they're on the same phase
+			//See if multiplying one of the coefficients by -1 results in the difference between them being smaller
+			if ( abs(testKet.coeff + longerState.at(matchedKetIndex).coeff ) > abs(testKet.coeff - longerState.at(matchedKetIndex).coeff ) ){
+				multiplyOverKets(&longerState, -1); //In that case, multiply the longer one by -1.
+				inPhase = true;
+			}
+		}
+		counter++;
+		if (counter == shorterState.size()){
+			break;
+		}
+	}
+*/
+        double runningTotal = 0;
+        double coeffDiff;
+        while (shorterState.size() > 0) {
+                testKet = shorterState.at(0);
+                matchedKetIndex = findKetIndex(&testKet, &longerState, 0);
+		if (matchedKetIndex != -1){
+                	coeffDiff = testKet.coeff - longerState.at(matchedKetIndex).coeff;
+                	runningTotal += coeffDiff * coeffDiff;
+			longerState.erase(longerState.begin() + matchedKetIndex);
+		} else{
+			runningTotal += testKet.coeff * testKet.coeff;
+		}
+		shorterState.erase(shorterState.begin());
+        }
+	cout << "coeffDiff after going through just one state: " << runningTotal << endl;
+	for (int i = 0; i < longerState.size(); i++){
+		runningTotal += (longerState.at(i).coeff)*(longerState.at(i).coeff);
+	}
+	cout << "coeffDiff after finishing off the longer state: " << runningTotal << endl;
+
+	cout << "Now trying this with the other phase:" << endl;
+	multiplyOverKets(&state2, -1);
+	if (!altPhase){
+		double runningTotalAltPhase = computeStateDifferencesSquared(state1, state2, true);
+		if (runningTotalAltPhase < runningTotal){
+			runningTotal = runningTotalAltPhase;
+		}
+	}
+
+	return runningTotal;
+}
+
+
+void makeGroundStateConverge(double threshold, int numValues, int maxLength, int maxBudget, int L,  string outputFile, int parameterOption){
+
+        //Open the output file
+        ofstream coeffDiffsOutput;
+        coeffDiffsOutput.open(outputFile + ".txt");
+	coeffDiffsOutput << "m0=" << m0 << endl;
+	coeffDiffsOutput << "mbar=" << mbar <<endl;
+	coeffDiffsOutput << "L=" << L << endl;
+
+        //Set up the initial parameters
+        if (parameterOption == 0){
+                budget = 2;
+                reach = maxLength;
+        } else if(parameterOption == 1){
+                reach = 2;
+                budget = maxBudget;
+        } else if (parameterOption == 2){
+                budget = 2;
+                reach = 6;
+        }
+
+        vector<vector<ket>> useBasis;
+        vector<ket> opBasis;
+        vector<ket> matrixBasis;
+        makeBasis(&useBasis, &opBasis, &matrixBasis, budget, reach);
+
+        //Sort out just the states with even numbers of excitations. Keep the odds around in case we'll use them later.
+        vector<vector<ket>> evenUseBasis;
+        vector<vector<ket>> oddUseBasis;
+        vector<ket> evenOpBasis;
+        vector<ket> oddOpBasis;
+        vector<ket> evenMatrixBasis;
+        vector<ket> oddMatrixBasis;
+
+        sortKetsByParity(&opBasis, &evenOpBasis, &oddOpBasis);
+        sortKetsByParity(&matrixBasis, &evenMatrixBasis, &oddMatrixBasis);
+        sortUseBasisByParity(&useBasis, &evenUseBasis, &oddUseBasis);
+
+        int basisSize = evenOpBasis.size();
+        cout << "Size of the basis: " << basisSize << endl;
+
+        Eigen::SparseMatrix<double> HtruncEven(basisSize, basisSize);
+        makeHtrunc(&HtruncEven, &evenUseBasis, &evenOpBasis, L);
+
+        vector<vector<ket>> groundStates;
+        vector<double> groundEnergies;
+        getGroundStates(&HtruncEven, numValues, &evenMatrixBasis, &groundStates, &groundEnergies, true);
+	vector<ket> prevGroundState = groundStates.at(groundStates.size() - 1);
+	vector<ket> nextGroundState;
+	double coeffDiffTotal;
+
+        //Now that I have an initial value, I can start incrementing the parameters and compare for convergence
+        bool converged;
+        while (!converged){
+                //Increment the relevant parameter.
+                if (parameterOption == 0){
+                        budget += 2; // Increment the budget by two, because of how the ground state only uses 1 parity.
+                } else if (parameterOption == 1){
+                        reach += 2;
+                } else if (parameterOption == 2){
+                        budget += 2;
+                        reach += 2; //Increment both by two if the convergence seems to be happening more slowly
+                }
+                useBasis.clear();
+                opBasis.clear();
+                matrixBasis.clear();
+                evenUseBasis.clear();
+                oddUseBasis.clear();
+                evenOpBasis.clear();
+                oddOpBasis.clear();
+                evenMatrixBasis.clear();
+                oddMatrixBasis.clear();
+
+                makeBasis(&useBasis, &opBasis, &matrixBasis, budget, reach); //Make the new basis
+                sortKetsByParity(&opBasis, &evenOpBasis, &oddOpBasis);
+                sortKetsByParity(&matrixBasis, &evenMatrixBasis, &oddMatrixBasis);
+                sortUseBasisByParity(&useBasis, &evenUseBasis, &oddUseBasis);
+
+                basisSize = evenOpBasis.size();
+                cout << "Made a basis of size " << basisSize << " with reach " << reach << " and budget " << budget << endl;
+
+                HtruncEven.setZero();
+                HtruncEven.resize(basisSize, basisSize);
+                makeHtrunc(&HtruncEven, &evenUseBasis, &evenOpBasis, L); //Make Htrunc again
+                cout << "Made the truncated Hamiltonian." << endl;
+
+                groundStates.clear();
+                groundEnergies.clear();
+                getGroundStates(&HtruncEven, numValues, &evenMatrixBasis, &groundStates, &groundEnergies, true);
+                nextGroundState = groundStates.at(groundStates.size() - 1);
+		coeffDiffTotal = computeStateDifferencesSquared(prevGroundState, nextGroundState, false);
+
+                cout << "Basis size: " << basisSize << endl;
+                cout << "CoeffDiff: " << coeffDiffTotal << endl;
+                coeffDiffsOutput << basisSize << ", " << budget << "," << reach << endl;
+                coeffDiffsOutput << coeffDiffTotal << endl;
+
+                if (coeffDiffTotal < threshold){ //If they've converged, finish the process
+
+			converged = true;
+                        //Now write the kets in the ground state to a file for later use
+                        string outputFileGS = outputFile + "GroundStates.txt";
+                        ofstream statesOutput;
+                        statesOutput.open(outputFileGS);
+                        //Immediately put in the key variables so those can be loaded later.
+                        statesOutput << "m0=" << m0 << endl;
+                        statesOutput << "mbar=" << mbar << endl;
+                        statesOutput << "reach=" << reach << endl;
+			statesOutput << "budget=" << budget << endl;
+			statesOutput << "L=" << L << endl;
+                        vector<ket> state;
+                        vector<int> localQuanta;
+                        double normTotal;
+                        for (int i = 0; i < groundStates.size(); i++){
+                                state = groundStates.at(groundStates.size() - 1 - i);
+                                statesOutput << i << "," << groundEnergies.at(groundStates.size() - 1 - i) << endl;
+                                for (int j = 0; j < state.size(); j++){
+                                        statesOutput << (state.at(j)).coeff << endl;
+                                        localQuanta = (state.at(j)).quanta;
+                                        for (int k = 0; k < localQuanta.size(); k++){
+                                                statesOutput << localQuanta.at(k) << ",";
+                                        }
+                                        statesOutput << endl;
+                                }
+                                statesOutput << "x" << endl; //This is a signal for the ket reader functions to move on
+                        }
+                        statesOutput.close();
+                } else{
+                        prevGroundState = nextGroundState;
+                }
+        }
+
+        coeffDiffsOutput.close();
+}
+
+void setReachFromNewBasis(vector<ket>* ketList){
+
+	int maxLength = 0;
+	for (int i = 0; i < ketList->size(); i++){
+		if ( (ketList->at(i)).quanta.size() > maxLength){
+			maxLength = (ketList->at(i)).quanta.size();
+		}
+	}
+
+	reach = maxLength;
+}
+
+double loadGroundEnergyFromFile(string filename){
+	ifstream inputFile;
+	inputFile.open(filename);
+
+	string oneLine;
+	inputFile >> oneLine;
+	inputFile >> oneLine;
+	inputFile >> oneLine; //Get through these lines, which are data we don't need
+	inputFile >> oneLine;
+	inputFile >> oneLine;
+	return stod(oneLine.substr(2));
 }
 
 void loadGroundStateFromFile(vector<ket>* groundStateKets, string filename){
@@ -936,6 +1400,9 @@ void loadGroundStateFromFile(vector<ket>* groundStateKets, string filename){
 	mbar = stod(oneLine.substr(5));
 	inputFile >> oneLine;
 	reach = stod(oneLine.substr(6));
+	inputFile >> oneLine;
+	int L;
+	L = stod(oneLine.substr(2));
 
 	double coeff;
 	vector<int> q;
@@ -971,6 +1438,211 @@ void loadGroundStateFromFile(vector<ket>* groundStateKets, string filename){
 
 	inputFile.close();
 	cout << "Finished loading the old ground state." << endl;
+}
+
+void groundStatesDifferenceSquared(string input1, string input2){
+
+	//Load all ground states
+	vector<ket> groundState1;
+	vector<ket> groundState2;
+	loadGroundStateFromFile(&groundState1, input1);
+	loadGroundStateFromFile(&groundState2, input2);
+
+	//Sort them so I can compare states in them faster.
+	groundState1 = sortKetList(groundState1);
+	groundState2 = sortKetList(groundState2);
+
+	ket testKet = groundState1.at(0);
+	int matchedKetIndex;
+	double runningTotal = 0;
+	double coeffDiff;
+	for (int i = 0; i < groundState1.size(); i++){
+		testKet = groundState1.at(i);
+		matchedKetIndex = findKetIndex(&testKet, &groundState2, 0);
+		coeffDiff = testKet.coeff - groundState2.at(matchedKetIndex).coeff;
+		runningTotal += coeffDiff * coeffDiff;
+	}
+	cout << runningTotal << endl;
+}
+
+void binKetCoeffs(string inputFile){
+
+	vector<ket> groundState;
+	loadGroundStateFromFile(&groundState, inputFile);
+	cout << "Number of kets in the ground state: " << groundState.size() << endl;
+	vector<int> coeffCounts = {0,0,0,0,0,0,0,0,0,0};
+	double logCoeff;
+	int bin;
+	for (int i = 0; i < groundState.size(); i++){
+		logCoeff = -log10(abs(groundState.at(i).coeff));
+		bin = floor(logCoeff);
+		while (bin >= coeffCounts.size()){
+			coeffCounts.push_back(0);
+		}
+		coeffCounts.at(bin) += 1;
+	}
+	for (int i = 0; i < 10; i++){
+		cout << "Bin " << i << " = " << coeffCounts[i] << endl;
+	}
+}
+
+void outputKetCoeffs(string inputFile, string outputFileName){
+
+	vector<ket> groundState;
+	loadGroundStateFromFile(&groundState, inputFile);
+	ofstream outputFile;
+	outputFile.open(outputFileName);
+
+	for (int i = 0; i < groundState.size(); i++){
+		outputFile << groundState.at(i).coeff << endl;
+	}
+
+	outputFile.close();
+}
+
+//Given a ground state, it picks out only the kets with the largest coefficients until a certain fraction of the normalization is covered
+void cutKetsByTotalNorm(double normalizationTarget, vector<ket>* masterGroundState, vector<ket>* cutGroundState, vector<vector<ket>>* useBasis, vector<ket>* opBasis, vector<ket>* matrixBasis){
+
+	double runningTotal = 0;
+	int ketCounter = 0;
+	ket tempKet = masterGroundState->at(0);
+	while (runningTotal < normalizationTarget){
+		tempKet = masterGroundState->at(ketCounter);
+		runningTotal += (tempKet.coeff)*(tempKet.coeff); //Add its normalization contribution to the running total
+		cutGroundState->push_back(tempKet);
+		//Now clean up the ket parameters and plug it into the basis
+		tempKet.coeff = 1;
+		tempKet.basisTag = ketCounter;
+		tempKet.resetIndices();
+		opBasis->push_back(tempKet);
+		ketCounter++;
+	}
+
+	//Sort the opBasis then plug those into the other bases.
+	*opBasis = sortKetList(*opBasis);
+	*matrixBasis = *opBasis;
+	for (int i = 0; i < opBasis->size(); i++){
+		vector<ket> tempState;
+		tempState.push_back(opBasis->at(i));
+		useBasis->push_back(tempState);
+	}
+}
+
+void cutKetsByTotalNormPlotEnergies(string inputFile, string outputName, int L){
+
+	vector<ket> masterGroundState;
+	vector<ket> cutGroundState;
+	loadGroundStateFromFile(&masterGroundState, inputFile);
+	double masterGroundEnergy = loadGroundEnergyFromFile(inputFile);
+
+	ofstream outputFile;
+	outputFile.open(outputName);
+
+	ofstream altOutputFile;
+	altOutputFile.open("basisDumps.txt");
+
+	double normalizationTarget = 0;
+	double runningTotal = 0;
+	int ketCounter = 0;
+	int numTotalKets = masterGroundState.size();
+	vector<vector<ket>> useBasis;
+	vector<ket> opBasis;
+	vector<ket> matrixBasis;
+	for (int i = 0; i < 5; i++){ //Counts how many 9s I put on my normalization target
+		normalizationTarget += 9*pow(10,-1-i);
+
+		cutKetsByTotalNorm(normalizationTarget, &masterGroundState, &cutGroundState, &useBasis, &opBasis, &matrixBasis);
+
+		cout << "ketCounter = " << ketCounter << endl;
+		cout << "opBasis.size() = " << opBasis.size() << endl;
+		Eigen::SparseMatrix<double> Htrunc(opBasis.size(), opBasis.size());
+		makeHtrunc(&Htrunc, &useBasis, &opBasis, L);
+		vector<vector<ket>> groundStates;
+		vector<double> groundEnergies;
+		getGroundStates(&Htrunc, 1, &matrixBasis, &groundStates, &groundEnergies, true);
+		outputFile << normalizationTarget << endl;
+		outputFile << ((double) ketCounter) / ((double) numTotalKets) << endl;
+		outputFile << groundEnergies.at(0) << endl;
+		cout << normalizationTarget << endl;
+		cout << ((double) ketCounter) / ((double) numTotalKets) << endl;
+		cout << groundEnergies.at(0) << endl;
+		cout << "groundEnergies.size() = " << groundEnergies.size() << endl;
+	}
+
+	outputFile.close();
+	altOutputFile.close();
+}
+
+void sumNormByBudgetAndReach(string inputName, string outputName){
+	vector<ket> masterGroundState;
+	loadGroundStateFromFile(&masterGroundState, inputName);
+	ofstream outputFile;
+	outputFile.open(outputName);
+
+	vector<double> budgetNorms(7, 0.0);
+	vector<double> reachNorms(10, 0.0);
+	ket tempKet = masterGroundState.at(0);
+	int ketBudget;
+	int ketSize;
+	for (int i = 0; i < masterGroundState.size(); i++){
+		tempKet = masterGroundState.at(i);
+		ketBudget = tempKet.totalQuanta();
+		ketSize = tempKet.quanta.size();
+		budgetNorms.at(ketBudget/2) += tempKet.coeff * tempKet.coeff;
+		reachNorms.at(ketSize-1) += tempKet.coeff * tempKet.coeff;
+	}
+
+	outputFile << "Budget norms: " << endl;
+	cout << "Budget norms: " << endl;
+	for (int i = 0; i < budgetNorms.size(); i++){
+		outputFile << i*2 << ": " << budgetNorms.at(i) << endl;
+		cout << i*2 << ": " << budgetNorms.at(i) << endl;
+	}
+
+	outputFile << "Reach norms: " << endl;
+	cout << "Reach norms: " << endl;
+	for (int i = 0; i < reachNorms.size(); i++){
+		outputFile << i+1 << ": " << reachNorms.at(i) << endl;
+		cout << i+1 << ": " << reachNorms.at(i) << endl;
+	}
+}
+
+void loadBasisFromFile(vector<vector<ket>>* useBasis, vector<ket>* opBasis, vector<ket>* matrixBasis, string filename){
+
+	ifstream inputFile;
+	inputFile.open(filename);
+
+	string line;
+	vector<int> tempQuanta = {0};
+	int i = 0;
+	while (inputFile){
+		inputFile >> line;//This reads in the coeff, which should be 1
+		if (stoi(line) != 1){
+			cout << "Warning: there's a basis element at " << i << " that wasn't entered with the right coefficient." << endl;
+		}
+		inputFile >> line; //This reads in the quanta
+		stringstream quantaStream(line);
+                string oneQuanta;
+		vector<int> q;
+                while (quantaStream.good()){
+                        getline(quantaStream, oneQuanta, ',');
+                        if(oneQuanta.length() == 0){
+                                continue; //I keep running into a miscounting problem with the last part
+                        }
+                        q.push_back(stoi(oneQuanta));
+                }
+                ket k(1, &q);
+		inputFile >> line; //This reads in the indices, which I don't need
+		inputFile >> line; //This reads in the basis tag
+		k.basisTag = stoi(line);
+
+		//Now I'm ready to plug this into the bases
+		opBasis->push_back(k);
+		matrixBasis->push_back(k);
+
+
+		i++;
+	}
 }
 
 void linearRegression(vector<double>* x, vector<double>* y){
@@ -1010,7 +1682,34 @@ void linearRegression(vector<double>* x, vector<double>* y){
         }
         cout << "Rsquared = " << 1 - sumResidualsSquared / sumMeanDiffSquared << endl;
 }
+/*
+void function_cx_1_func(const real_1d_array &c, const real_1d_array &x, double &func, void *ptr){
+	func = exp(-c[0]*pow(x[0],2));
+}
 
+void TwoPtFitFunction(const real_1d_array &c, const real_1d_array &L, double &func, void *ptr){
+	func = c[0] / pow(c[1]*L[0],0.5) * exp(-c[1]*L[0]);
+}
+
+void fitCorrelatorData(){
+	real_2d_array x = "[[1],[2],[3],[4],[5],[6],[7]]";
+	real_1d_array y = "[2.77988 1.99594 1.43685 0.991814 0.639843 0.371418 0.174103 0.0304461]";
+	real_1d_array c = "[1.0, 1.0]";
+	double epsx = 0.000001;
+	ae_int_t maxits = 0;
+	ae_int_t info;
+	lsfitstate state;
+	lsfitreport rep;
+	double diffstep = 0.0001;
+
+	lsfitcreatef(x,y,c,diffstep,state);
+	lsfitsetcond(state, epsx, maxits);
+	alglib::lsfitfit(state, TwoPtFitFunction);
+	lsfitresults(state, info, c, rep);
+	printf("%d\n", int(info));
+	printf("%s\n", c.tostring(1).c_str());
+}
+*/
 void plotCorrelators(vector<ket>* groundState, string corrOutput){
 	ofstream outputFile;
 	outputFile.open(corrOutput);
@@ -1030,7 +1729,8 @@ void plotCorrelators(vector<ket>* groundState, string corrOutput){
 		Rstate = *groundState;
 		Lstate = *groundState;
 
-		Rstate = correlator(&Rstate, i);
+		correlator(&Rstate, i);
+		cout << "i = " << i << ", computed the operator." << endl;
 		result = innerProduct(&Lstate, &Rstate);
 		if (result != 0){
 			xs.push_back(i);
@@ -1081,32 +1781,6 @@ void linearRegressionFromFile(string fileName){
 	linearRegression(&xs, &ys);
 }
 
-//check if a sparse matrix is diagonal
-bool isSymmetric(Eigen::SparseMatrix<double>* Htrunc){
-
-	int n = Htrunc->rows();
-	if (n != Htrunc->cols()){
-		cout << "Warning: matrix is not diagonal." << endl;	
-	}
-
-	for (int i = 0; i < n; i++){
-		for (int j = 0; j <= i; j++){ //I only need to check the upper-triangular part of the matrix, so just go until j < i
-			if ( abs(Htrunc->coeffRef(i,j) - Htrunc->coeffRef(j,i)) > cutoff){ //See if this element isn't equal to its partner across the diagonal
-				cout << "Asymmetry at (" << i << "," << j << ")" << endl;
-				cout << "Htrunc(" << i << "," << j << ") = " << Htrunc->coeffRef(i,j) << endl;
-				cout << "Htrunc(" << j << "," << i << ") = " << Htrunc->coeffRef(j,i) << endl;
-				cout << "Difference = " << Htrunc->coeffRef(i,j) - Htrunc->coeffRef(j,i) << endl;
-				cout << "Relevant basis states are... " << endl;
-				cout << "i = " << i << endl;
-				cout << "j = " << j << endl;
-				return false;
-			}
-		}
-	}
-	
-	return true;	//If it made it through all that and never found one that didn't match, it's symmetric.
-}
-
 //Updates the operator and matrix basis, with the proper ordering with new basis elements. Ones to take out are in oldKets, and new ones are in newKets. Then, the matrix indices of each new ket is stored in matrixUpdateList
 void updateBasis(vector<ket>* opBasis, vector<ket>* matrixBasis, vector<ket>* oldKets, vector<ket>* newKets, vector<int>* matrixUpdateList){
 
@@ -1130,14 +1804,20 @@ void updateBasis(vector<ket>* opBasis, vector<ket>* matrixBasis, vector<ket>* ol
 		opBasis->erase(opBasis->begin() + oldOpIndex);
 		insertKet(&(newKets->at(i)), opBasis);
 	}
+
+	//Update the reach, since that'll be important for searching for new kets later
+	for (int i = 0; i < newKets->size(); i++){
+		if ((newKets->at(i)).quanta.size() > reach){
+			reach = (newKets->at(i)).quanta.size();
+		}
+	}
 }
 
 //Recalculates select rows and columns of the matrix based on matrixUpdateList
 void updateMatrix(Eigen::SparseMatrix<double>* Htrunc, vector<ket>* opBasis, vector<ket>* matrixBasis, vector<int>* matrixUpdateList){
 	vector<int> tempQuanta = {0};
 	ket tempKet(1,&tempQuanta); //This just defines the variables so they aren't created new every loop
-	vector<ket> tempState;
-	vector<ket> postOpState;
+	vector<ket> preppedState;
 	int row;
 	int column;
 
@@ -1155,10 +1835,10 @@ void updateMatrix(Eigen::SparseMatrix<double>* Htrunc, vector<ket>* opBasis, vec
 	for (int i = 0; i < matrixUpdateList->size(); i++){
 		column = matrixUpdateList->at(i);
 		tempKet = matrixBasis->at(column); //Pull up the ket that's been updated
-		tempState.push_back(tempKet);
-		postOpState = HSumOverLSites(tempState, -reach, reach); //Act on it with the translationally-invariant operator
-		for (int j = 0; j < postOpState.size(); j++){
-			tempKet = postOpState.at(j); //Go through each ket in the result, find their matrix index, and update
+		preppedState.push_back(tempKet);
+		HSumOverLSites(&preppedState, -reach, reach); //Act on it with the translationally-invariant operator
+		for (int j = 0; j < preppedState.size(); j++){
+			tempKet = preppedState.at(j); //Go through each ket in the result, find their matrix index, and update
 			row = findKetIndex(&tempKet, opBasis);
 			if (row != -1){
 				Htrunc->coeffRef(row, column) += tempKet.coeff;
@@ -1167,12 +1847,84 @@ void updateMatrix(Eigen::SparseMatrix<double>* Htrunc, vector<ket>* opBasis, vec
 				}
 			}
 		}
-		tempState.clear(); //Clear out the variable for the next pass through the loop
+		preppedState.clear(); //Clear out the variable for the next pass through the loop
 	}
 
-	cout << "Matrix after all updates: " << endl;
-	cout << *Htrunc << endl;
+	//cout << "Matrix after all updates: " << endl;
+	//cout << *Htrunc << endl;
 
+}
+
+//Do a version of the gradient-descent method on the approximate ground state. Fills in lists of kets that will be used to update the basis.
+void findNewKetsFromGroundState(vector<ket>* groundState, vector<ket>* opBasis, vector<ket>* matrixBasis, vector<ket>* oldKets, vector<ket>* newKets, double prevGroundEnergy, double groundStateCutoff){
+
+	vector<ket> prevGroundState = *groundState;
+	//Act on the previous ground state with	HSum... etc etc but make it one longer on either end
+	HSumOverLSites(groundState, -(reach+1), reach+1);
+
+	//Check every ket in the list against the previous ground state. If it can't be found, save it to the list of new kets.
+	vector<ket> potentialNewKets;
+	prevGroundState = sortKetList(prevGroundState); //Sort it so I can look up kets in this list, like the opBasis
+	for (int i = 0; i < groundState->size(); i++){
+		if (findKetIndex(&(groundState->at(i)), &prevGroundState) == -1){ //This means the ket isn't in the list
+			potentialNewKets.push_back(groundState->at(i));
+		}
+	}
+	potentialNewKets = sortKetsByCoeff(potentialNewKets); //Sort them by greatest coefficient to least to figure out which is most imporant.
+
+	cout << "Potential new kets: " << endl;
+	listStateValues(&potentialNewKets);
+
+	//Check every ket in the opBasis against the previous ground state. If it can't be found, we can get rid of it, so save it to the list of old kets.
+	//They're all equally unimportant, so don't worry about sorting them.
+	vector<ket> potentialOldKets;
+	for (int i = 0; i < opBasis->size(); i++){
+		if (findKetIndex( &(opBasis->at(i)), &prevGroundState) == -1){
+			potentialOldKets.push_back(opBasis->at(i));
+		}
+	}
+
+	if (potentialOldKets.size() == 0){
+		cout << "All the kets in the basis matter for the ground state. Time to judge which ones are the most interesting." << endl;
+		//Collect the kets below a given cutoff. Hopefully the kets from the new list will matter more
+		int numPrevKets = prevGroundState.size();
+		ket tempKet = prevGroundState.at(0); //Just a placeholder
+		int numNewKets = 0; //Counts how many new kets we're pulling in from potentialNewKets
+		for (int i = 0; i < numPrevKets; i++){
+			//Count backwards to save time; start from where the coeffs are low
+			tempKet = prevGroundState.at(numPrevKets - 1 - i);
+			if ( abs(tempKet.coeff) < groundStateCutoff){
+				oldKets->push_back(tempKet); //This ket matters too little to the ground state; get rid of it
+				newKets->push_back(potentialNewKets.at(numNewKets));
+				numNewKets++;
+			} else{
+				break; //Anything else on the list is going to be too high too.
+			}
+		}
+		if (numNewKets == 0){
+			cout << "No new kets were added. Lower the cutoff." << endl;
+		}
+		return;
+	}
+
+	if (potentialNewKets.size() < potentialOldKets.size()){
+		//All the potential new kets will go into the basis
+		*newKets = potentialNewKets;
+		for (int i = 0; i < potentialNewKets.size(); i++){
+			oldKets->push_back(potentialOldKets.at(i));
+		}
+	} else{ //All the old kets will get swapped out, and only the new kets with the highest coefficients will go in
+		*oldKets = potentialOldKets;
+		for (int i = 0; i < potentialOldKets.size(); i++){
+			newKets->push_back(potentialNewKets.at(i));
+		}
+	}
+
+	//Reset the coefficients of the new kets
+	for (int i = 0; i < newKets->size(); i++){
+		(newKets->at(i)).coeff = 1;
+		(newKets->at(i)).resetIndices();
+	}
 }
 
 void setUserParameters(){
@@ -1314,33 +2066,78 @@ void testBasisMaking(){
 
 void testMakeHtrunc(){
 
-	budget = 2;
-	reach = 2;
+	//budget = 2;
+	//reach = 2;
+	budget = 4;
+	reach = 4;
 	vector<vector<ket>> useBasis;
 	vector<ket> opBasis;
 	vector<ket> matrixBasis;
 
-	makeBasis(&useBasis, &opBasis, &matrixBasis, budget, reach);
+	//makeBasis(&useBasis, &opBasis, &matrixBasis, budget, reach);
+	vector<int> q1 = {0};
+	vector<int> q2 = {1,0,1};
+	vector<int> q3 = {1,1};
+	vector<int> q4 = {1,1,1,1};
+	vector<int> q5 = {1,2,1};
+	vector<int> q6 = {2};
+	vector<int> q7 = {2,2};
+	ket k1(1,&q1);
+	ket k2(1,&q2);
+	ket k3(1,&q3);
+	ket k4(1,&q4);
+	ket k5(1,&q5);
+	ket k6(1,&q6);
+	ket k7(1,&q7);
+	opBasis.push_back(k1);
+	opBasis.push_back(k2);
+	opBasis.push_back(k3);
+	opBasis.push_back(k4);
+	opBasis.push_back(k5);
+	opBasis.push_back(k6);
+	opBasis.push_back(k7);
+
+        matrixBasis.push_back(k1);
+        matrixBasis.push_back(k5);
+        matrixBasis.push_back(k3);
+        matrixBasis.push_back(k2);
+        matrixBasis.push_back(k6);
+        matrixBasis.push_back(k4);
+        matrixBasis.push_back(k7);
+
+	for (int i = 0; i < matrixBasis.size(); i++){
+		matrixBasis.at(i).basisTag = i;
+	}
+	vector<int> matrixTags = {0,3,2,5,1,4,6};
+	for (int i = 0; i < opBasis.size(); i++){
+		opBasis.at(i).basisTag = matrixTags.at(i);
+		vector<ket> tempState;
+		tempState.push_back(opBasis.at(i));
+		useBasis.push_back(tempState);
+	}
+
 	cout << "Basis elements: " << endl;
 	listStateValues(&opBasis);
 	cout << endl;
 	int basisSize = opBasis.size();
 
 	Eigen::SparseMatrix<double> Htrunc(basisSize, basisSize);
-	makeHtrunc(&Htrunc, &useBasis, &opBasis);
+	int L = 3*reach + 3;
+	makeHtrunc(&Htrunc, &useBasis, &opBasis, L);
 
 	cout << Htrunc << endl;
 
 	vector<vector<ket>> groundStates;
 	vector<double> groundEnergies;
-	getGroundStates(&Htrunc, 1, &matrixBasis, &groundStates, &groundEnergies);
-	cout << "Ground energy: " << groundEnergies.at(0) << endl;
+	getGroundStates(&Htrunc, 2, &matrixBasis, &groundStates, &groundEnergies, false);
+	cout << "Ground energy: " << groundEnergies.at(1) << endl;
 	cout << "Ground state: " << endl;
-	listStateValues(&(groundStates.at(0)));
+	listStateValues(&(groundStates.at(1)));
 
+	/*
 	vector<ket> stateL = groundStates.at(0);
 	vector<ket> stateR = groundStates.at(0);
-	stateR = correlator(&stateR,1);
+	correlator(&stateR,1);
 
 	cout << "stateR: " << endl;
 	listStateValues(&stateR);
@@ -1351,6 +2148,7 @@ void testMakeHtrunc(){
 	cout << endl;
 
 	cout << innerProduct(&stateL, &stateR) << endl;
+	*/
 }
 
 //This is to see if Spectra is working and if I'm including the libraries properly
@@ -1395,8 +2193,8 @@ void checkSameQuanta(){
 
 void testRegression(){
 
-	vector<double> x = {2,3,4,6};
-	vector<double> y = {2,4,6,7};
+	vector<double> x = {1,2,3,4,5,6,7};
+	vector<double> y = {1.02240776, 0.69111512, 0.36245322, -0.00821969, -0.44653245, -0.99042717, -1.7481082};
 
 	linearRegression(&x, &y);
 
@@ -1424,11 +2222,44 @@ void HactOnOneState(){
 	state0.push_back(k3);
 	cout << "Hop acting on |1,1>" << endl;
 
-	vector<ket> result = HSumOverLSites(state0,-5,5);
-	listStateValues(&result);
+	HSumOverLSites(&state0,-5,5);
+	listStateValues(&state0);
+}
+
+void testInsertToSortedList(){
+        vector<int> q1 = {0};
+        vector<int> q2 = {1,1};
+        vector<int> q3 = {1,0,1};
+        vector<int> q4 = {2};
+        reach = 3;
+        ket k1(0.5, &q1);
+        ket k2(0.5, &q2);
+        ket k3(0.5, &q3);
+        ket k4(0.5, &q4);
+        vector<ket> cutGroundState;
+        cutGroundState.push_back(k2);
+        cutGroundState.push_back(k1);
+        cutGroundState.push_back(k3);
+        cutGroundState.push_back(k4);
+
+        cutGroundState = sortKetList(cutGroundState);
+
+        vector<ket> newKets;
+        vector<int> q5 = {2,1,1};
+        ket k5(0.2, &q5);
+        newKets.push_back(k5);
+        k1.coeff = 0.25;
+        newKets.push_back(k1);
+        k4.coeff = -0.5;
+        newKets.push_back(k4);
+        insertToSortedList(&cutGroundState, &newKets);
+        listStateValues(&cutGroundState);
+
 }
 
 void testUpdateBasis(){
+
+	double ketCutoff = 0.0001; //Just a placeholder
 
 	//Make a simple basis
 	budget = 3;
@@ -1443,12 +2274,61 @@ void testUpdateBasis(){
 	//Make the Hamiltonian to go with it
 	int basisSize = opBasis.size();
 	Eigen::SparseMatrix<double> Htrunc(basisSize, basisSize);
-	makeHtrunc(&Htrunc, &useBasis, &opBasis);
+	int L = 3*reach + 3;
+	makeHtrunc(&Htrunc, &useBasis, &opBasis, L);
 	cout << "Htrunc in the starting basis: " << endl;
 	cout << Htrunc << endl;
 
-	//Update the basis by swapping out odds for evens
+	vector<vector<ket>> groundStates;
+	vector<double> groundEnergies;
+	getGroundStates(&Htrunc, 2, &matrixBasis, &groundStates, &groundEnergies, true);
+
+	cout << endl;
+	cout << "Energy = " << groundEnergies.at(0) << endl;
+	listStateValues(&(groundStates.at(0)));
+	cout << endl;
+	//cout << "Energy = " << groundEnergies.at(1) << endl;
+	//listStateValues(&(groundStates.at(1)));
+	
 	vector<ket> oldKets;
+	vector<ket> newKets;
+	findNewKetsFromGroundState(&(groundStates.at(0)), &opBasis, &matrixBasis, &oldKets, &newKets, groundEnergies.at(0), ketCutoff);
+	cout << "Old kets to remove from the basis: " << endl;
+	listStateValues(&oldKets);
+	cout << endl;
+	cout << "New kets to add to the basis" << endl;
+	listStateValues(&newKets);
+
+	vector<int> matrixUpdateList;
+	updateBasis(&opBasis, &matrixBasis, &oldKets, &newKets, &matrixUpdateList);
+
+	cout << "Updated basis (operator ordering): " << endl;
+	listStateValues(&opBasis);
+
+	cout << "Updated basis (matrix ordering): " << endl;
+	listStateValues(&matrixBasis);
+
+	cout << "Matrix indices of updated basis elements: " << endl;
+	printVector(&matrixUpdateList);
+
+	updateMatrix(&Htrunc, &opBasis, &matrixBasis, &matrixUpdateList);
+
+	cout << "Updated matrix: " << endl;
+	cout << Htrunc << endl;
+
+	cout << "New ground state: " << endl;
+	groundStates.clear();
+	groundEnergies.clear();
+	getGroundStates(&Htrunc, 1, &matrixBasis, &groundStates, &groundEnergies, false);
+	listStateValues(&groundStates.at(0));
+
+	cout << "Now putting that ket through the process one more time..." << endl;
+	oldKets.clear();
+	newKets.clear();
+	findNewKetsFromGroundState(&(groundStates.at(0)), &opBasis, &matrixBasis, &oldKets, &newKets, groundEnergies.at(0), ketCutoff);
+
+	//Update the basis by swapping out odds for evens
+	/*vector<ket> oldKets;
 	vector<ket> newKets;
 	vector<int> matrixUpdateList;
 	oldKets.push_back(opBasis.at(1));
@@ -1483,32 +2363,110 @@ void testUpdateBasis(){
 	updateMatrix(&Htrunc, &opBasis, &matrixBasis, &matrixUpdateList);
 	cout << endl;
 	cout << "Is it symmetric? " << isSymmetric(&Htrunc) << endl;
+	*/
+}
+
+void testComputeStateDifferencesSquared(){
+
+	vector<int> q1 = {0};
+	vector<int> q2 = {1,1};
+	vector<int> q3 = {2,2};
+	vector<int> q4 = {2};
+
+	ket k1(0.5, &q1);
+	ket k2(0.5, &q2);
+	ket k3(0.5, &q3);
+	ket k4(0.5, &q4);
+
+	vector<ket> state1;
+	state1.push_back(k1);
+	state1.push_back(k2);
+	state1.push_back(k3);
+	state1.push_back(k4);
+
+	vector<ket> state2;
+	state2.push_back(k1);
+	state2.push_back(k2);
+	state2.push_back(k3);
+	//state2.push_back(k4);
+	vector<int> q5 = {3};
+	ket k5(0.1, &q5);
+	state2.push_back(k5);
+
+	cout << computeStateDifferencesSquared(state1, state2, false) << endl;
+}
+
+void varyLcheckEnergy(){
+
+	budget = 6;
+	reach = 8;
+
+        vector<vector<ket>> useBasis;
+        vector<ket> opBasis;
+        vector<ket> matrixBasis;
+        makeBasis(&useBasis, &opBasis, &matrixBasis, budget, reach);
+	vector<int> Ls = {27, 33, 39, 45, 51};
+
+	vector<vector<ket>> groundStates;
+	vector<double> groundEnergies;
+
+	for (int i = 0; i < Ls.size(); i++){
+		Eigen::SparseMatrix<double> Htrunc(opBasis.size(), opBasis.size());
+		makeHtrunc(&Htrunc, &useBasis, &opBasis, Ls.at(i));
+		getGroundStates(&Htrunc, 1, &matrixBasis, &groundStates, &groundEnergies, true);
+		cout << "L = " << Ls.at(i) << endl;
+		cout << "Ground state energy = " << groundEnergies.at(0) << endl;
+	}
 }
 
 int main(int argc, char *argv[]){
 
 	/*
-	vector<int> testQuanta = {4};
-	ket k(1,&testQuanta);
+	vector<int> testQuanta = {1};
+	vector<int> testIndices = {1};
+	ket k(-0.383897,&testQuanta);
+	k.indices = testIndices;
 	vector<ket> state;
 	state.push_back(k);
-	vector<ket> result = Hop(state, 0);
-	listStateValues(&result);
+	listStateValues(&state);
+	aDagOp(&state, 2);
+	listStateValues(&state);
 	*/
-	setUserParameters();
-	vector<vector<ket>> useBasis;
-	vector<ket> opBasis;
-	vector<ket> matrixBasis;
-	makeBasis(&useBasis, &opBasis, &matrixBasis, budget, reach);
-	listStateValues(&opBasis);
-	/*	
-	string filename = "r10FivePercent";
-	makeHtruncConverge(0.05, 1, 10, filename);
-	cout << "Finished making the truncated H." << endl;
-	vector<ket> groundState;
-	loadGroundStateFromFile(&groundState, filename + "GroundStates.txt");
-	plotCorrelators(&groundState, filename + "Correlator.txt");
-	*/
+	//vector<ket> result = phixphixpa(&state, 0, 2);
+	//listStateValues(&result);
+
+	//testUpdateBasis();
+
+	//testComputeStateDifferencesSquared();
+	
+	varyLcheckEnergy();
+
+	//setUserParameters();
+	//listStateValues(&opBasis);
+	string filename = "";
+	//binKetCoeffs(filename);
+	//cout << loadGroundEnergyFromFile(filename) << endl;
+
+	//outputKetCoeffs("r10FivePercentEvenGroundStates.txt","r10FivePercentEvenGroundStatesCoeffs.txt");
+	//sumNormByBudgetAndReach("r10FivePercentEvenGroundStates.txt", "r10FivePercentEvenBudgetAndReachNorms.txt");
+
+	//cutKetsByTotalNormPlotEnergies(filename, "r10FivePercentEvenCutGroundEnergies.txt");
+	//reach = 15;
+	//budget = 6;
+	//int L = reach * 3 + 3;
+	//makeHtruncConverge(0.03, 1, reach, 8, L, filename, 1);
+	//makeGroundStateConverge(0.001, 1, reach, budget, L, filename, 1);
+	//vector<ket> groundState;
+	//loadGroundStateFromFile(&groundState, filename + "GroundStates.txt");
+	//vector<ket> cutGroundState;
+	//double normCutThreshold = 0.9999;
+	//cutKetsByTotalNorm(normCutThreshold, &groundState, &cutGroundState, &useBasis, &opBasis, &matrixBasis);
+	//cout << cutGroundState.size() << endl;
+	//setReachFromNewBasis(&cutGroundState);
+	//cout << "New reach = " << reach << endl;
+	
+	//plotCorrelators(&cutGroundState, filename + "CorrelatorNormCut9999.txt");
+	
 	/*
 	cout << "Is it symmetric? " << isSymmetric(&Htrunc) << endl;
 
